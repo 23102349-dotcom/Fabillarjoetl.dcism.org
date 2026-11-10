@@ -1,0 +1,363 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CSV to JSON</title>
+</head>
+<body>
+<h1>Joel June Fabillar</h1>
+<h3><i>IT 3206N 3:00 - 5:30 PM T-TH</i></h3>
+
+<br>
+
+<h1>CSV to JSON</h1>
+
+<h2>1. Upload Source CSV Files</h2>
+
+<p>Student Information System (SIS):</p>
+<input type="file" id="sisFile" accept=".csv,text/csv">
+
+<p>Learning Management System (LMS):</p>
+<input type="file" id="lmsFile" accept=".csv,text/csv">
+
+<p>Accounting System:</p>
+<input type="file" id="accountingFile" accept=".csv,text/csv">
+<br><br>
+<br>
+
+<button id="runButton" onclick="runETL()">RUN ETL</button>
+
+<p id="status">Upload the three CSV files and click RUN ETL.</p>
+
+<h2>6. JSON Output (For integrated students)</h2>
+
+<pre id="jsonOutput">Upload the CSV files and click RUN ETL.</pre>
+
+<script>
+function parseCSV(text) {
+    const rows = [];
+    let row = [], value = "", quoted = false;
+
+    text = text.replace(/^\uFEFF/, "");
+
+    for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+
+        if (ch === '"') {
+            if (quoted && text[i + 1] === '"') {
+                value += '"';
+                i++;
+            } else {
+                quoted = !quoted;
+            }
+        } else if (ch === "," && !quoted) {
+            row.push(value);
+            value = "";
+        } else if ((ch === "\n" || ch === "\r") && !quoted) {
+            if (ch === "\r" && text[i + 1] === "\n") i++;
+
+            row.push(value);
+
+            if (row.some(v => v.trim() !== "")) {
+                rows.push(row);
+            }
+
+            row = [];
+            value = "";
+        } else {
+            value += ch;
+        }
+    }
+
+    row.push(value);
+
+    if (row.some(v => v.trim() !== "")) {
+        rows.push(row);
+    }
+
+    if (quoted) {
+        throw new Error("Invalid CSV: unclosed quotation mark.");
+    }
+
+    if (rows.length < 2) {
+        throw new Error("Each CSV must contain a header and at least one data row.");
+    }
+
+    const headers = rows[0].map(h => h.trim());
+
+    if (headers.some(h => !h)) {
+        throw new Error("CSV contains an empty column header.");
+    }
+
+    if (new Set(headers).size !== headers.length) {
+        throw new Error("CSV contains duplicate column headers.");
+    }
+
+    return rows.slice(1).map(values => {
+        const record = {};
+
+        headers.forEach((h, i) => {
+            record[h] = (values[i] ?? "").trim();
+        });
+
+        return record;
+    });
+}
+
+function trimValue(value) {
+    return String(value ?? "").trim();
+}
+
+function properCase(value) {
+    return trimValue(value)
+        .toLowerCase()
+        .replace(/(^|[\s'-])([a-z])/g, (match, separator, letter) => {
+            return separator + letter.toUpperCase();
+        });
+}
+
+async function readCSV(inputId, label) {
+    const file = document.getElementById(inputId).files[0];
+
+    if (!file) {
+        throw new Error("Please select the " + label + " CSV file.");
+    }
+
+    return parseCSV(await file.text());
+}
+
+function convertStudentId(value, rowNumber) {
+    const id = trimValue(value);
+
+    if (!/^\d+$/.test(id)) {
+        throw new Error(
+            "Invalid student_id in SIS row " + rowNumber + "."
+        );
+    }
+
+    const number = Number(id);
+
+    if (!Number.isSafeInteger(number)) {
+        throw new Error(
+            "Student ID is outside the supported integer range in row " + rowNumber + "."
+        );
+    }
+
+    return number;
+}
+
+function convertGrade(value) {
+    const grade = trimValue(value);
+
+    if (grade === "") {
+        return null;
+    }
+
+    const number = Number(grade);
+
+    if (Number.isFinite(number)) {
+        return number;
+    }
+
+    return grade.toUpperCase();
+}
+
+function convertBalance(value, studentId) {
+    const balance = trimValue(value);
+
+    if (balance === "") {
+        return null;
+    }
+
+    const number = Number(balance.replace(/,/g, ""));
+
+    if (!Number.isFinite(number)) {
+        throw new Error(
+            "Invalid account balance for student " + studentId + "."
+        );
+    }
+
+    return number;
+}
+
+async function runETL() {
+    const button = document.getElementById("runButton");
+    const status = document.getElementById("status");
+    const output = document.getElementById("jsonOutput");
+
+    button.disabled = true;
+    status.style.color = "";
+    status.textContent = "Reading files and running ETL...";
+    output.textContent = "Processing...";
+
+    try {
+
+        const [sis, lms, accounting] = await Promise.all([
+            readCSV("sisFile", "SIS"),
+            readCSV("lmsFile", "LMS"),
+            readCSV("accountingFile", "Accounting")
+        ]);
+
+        const programMap = {
+            BSIT: "Bachelor of Science in Information Technology",
+            BSCS: "Bachelor of Science in Computer Science",
+            BSIS: "Bachelor of Science in Information Systems"
+        };
+
+        const lmsById = new Map();
+
+        lms.forEach(record => {
+            const id = trimValue(record.student_id);
+
+            if (id && !lmsById.has(id)) {
+                lmsById.set(id, record);
+            }
+        });
+
+        const accountingById = new Map();
+
+        accounting.forEach(record => {
+            const id = trimValue(record.student_id);
+
+            if (id && !accountingById.has(id)) {
+                accountingById.set(id, record);
+            }
+        });
+
+        const sisIds = new Set(
+            sis.map(record => trimValue(record.student_id))
+        );
+
+        const integratedStudents = sis.map((student, index) => {
+
+            const idText = trimValue(student.student_id);
+
+            const studentId = convertStudentId(
+                idText,
+                index + 2
+            );
+
+            const programCode = trimValue(
+                student.program_code
+            ).toUpperCase();
+
+            if (!programMap[programCode]) {
+                throw new Error(
+                    "Unknown program code '" +
+                    programCode +
+                    "' in SIS row " +
+                    (index + 2) +
+                    "."
+                );
+            }
+
+            const lmsRecord = lmsById.get(idText);
+            const accountingRecord = accountingById.get(idText);
+
+            let lmsData = null;
+
+            if (lmsRecord) {
+                lmsData = {
+                    courseCode: trimValue(
+                        lmsRecord.course_code
+                    ).toUpperCase(),
+
+                    finalGrade: convertGrade(
+                        lmsRecord.final_grade
+                    ),
+
+                    completionStatus: properCase(
+                        lmsRecord.completion_status
+                    )
+                };
+            }
+
+            let accountingData = null;
+
+            if (accountingRecord) {
+                accountingData = {
+                    outstandingBalance: convertBalance(
+                        accountingRecord.account_balance,
+                        idText
+                    ),
+
+                    currency: trimValue(
+                        accountingRecord.currency
+                    ).toUpperCase()
+                };
+            }
+
+            return {
+                studentId: studentId,
+
+                studentName: properCase(
+                    student.student_name
+                ),
+
+                program: programMap[programCode],
+
+                emailAddress: trimValue(
+                    student.email
+                ).toLowerCase(),
+
+                lms: lmsData,
+
+                accounting: accountingData
+            };
+        });
+
+        const unmatchedRecords = [];
+
+        lms.forEach(record => {
+            const id = trimValue(record.student_id);
+
+            if (!sisIds.has(id)) {
+                unmatchedRecords.push({
+                    sourceSystem: "LMS",
+                    ...record
+                });
+            }
+        });
+
+        accounting.forEach(record => {
+            const id = trimValue(record.student_id);
+
+            if (!sisIds.has(id)) {
+                unmatchedRecords.push({
+                    sourceSystem: "Accounting",
+                    ...record
+                });
+            }
+        });
+
+        output.textContent = JSON.stringify(
+            integratedStudents,
+            null,
+            4
+        );
+
+        status.textContent =
+            "ETL completed successfully. " +
+            integratedStudents.length +
+            " student(s) integrated. " +
+            unmatchedRecords.length +
+            " unmatched LMS/Accounting record(s) found.";
+
+    } catch (error) {
+
+        status.textContent = error.message;
+        status.style.color = "#b91c1c";
+
+        output.textContent =
+            "ETL failed. Please check your CSV files and try again.";
+
+    } finally {
+        button.disabled = false;
+    }
+}
+</script>
+
+</body>
+</html>
